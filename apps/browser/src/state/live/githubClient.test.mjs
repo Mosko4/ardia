@@ -21,9 +21,41 @@ function fakeGithub(clock) {
   const calls = [];
   let quota = { limit: 5000, remaining: 4000, reset: Math.floor((clock.now + 3_600_000) / 1000) };
   let limitNext = null;
+  let failRest = null;
   let blockedSearch = null;
+  const blockedKeys = new Map();
+  const hidden = new Set();
   const closed = new Set();
-  globalThis.fetch = async (_url, init) => {
+  const restIssue = (n) => ({
+    node_id: n.id,
+    number: n.number,
+    title: n.title,
+    html_url: n.url,
+    updated_at: n.updatedAt,
+    draft: n.isDraft,
+    comments: n.comments.totalCount,
+    user: n.author ? { login: n.author.login, avatar_url: n.author.avatarUrl } : null,
+    repository_url: `https://api.github.com/repos/${n.repository.nameWithOwner}`,
+    pull_request: { merged_at: null },
+  });
+  const restItems = (key) => {
+    const rows = key === "direct" ? list.data.direct.nodes.map((d) => all().find((n) => n?.id === d.id)) : list.data[key].nodes;
+    return rows.filter((n) => n && n.number).map(restIssue);
+  };
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+    if (href.includes("/search/issues")) {
+      const key = searchKey(new URL(href).searchParams.get("q") ?? "");
+      calls.push({ kind: "rest", key });
+      if (failRest) {
+        const { status, extra } = failRest;
+        failRest = null;
+        return new Response(JSON.stringify({ message: "Server Error" }), { status, headers: extra });
+      }
+      const items = restItems(key);
+      const restHeaders = { "x-ratelimit-limit": "30", "x-ratelimit-remaining": "29", "x-ratelimit-reset": String(quota.reset) };
+      return new Response(JSON.stringify({ total_count: items.length, incomplete_results: false, items }), { status: 200, headers: restHeaders });
+    }
     const { query, variables } = JSON.parse(init.body);
     const kind = queryKind(query, variables);
     calls.push({ kind, ids: variables?.ids });
@@ -33,12 +65,14 @@ function fakeGithub(clock) {
       limitNext = null;
       return new Response(JSON.stringify({ message: "You have exceeded a secondary rate limit" }), { status, headers: { ...h, ...extra } });
     }
+    const errors = blockedKeys.get(searchKey(variables?.q ?? "")) ?? (blockedSearch && kind === blockedSearch.kind ? blockedSearch.errors : null);
     const body =
       kind === "list" || kind === "search"
-        ? { ...searchAnswer(list.data, variables), ...(blockedSearch && kind === blockedSearch.kind ? { errors: blockedSearch.errors } : {}) }
+        ? { ...searchAnswer(list.data, variables), ...(errors ? { errors } : {}) }
         : kind === "details"
           ? { data: { nodes: variables.ids.map((id) => ({ ...all().find((n) => n?.id === id), state: closed.has(id) ? "MERGED" : "OPEN" })) } }
           : { data: { viewer: { login: "me", name: null, avatarUrl: "" } } };
+    if (body.data?.search) body.data.search.nodes = body.data.search.nodes.map((n) => (n && hidden.has(n.id) ? null : n));
     return new Response(JSON.stringify(body), { status: 200, headers: h });
   };
   return {
@@ -47,13 +81,20 @@ function fakeGithub(clock) {
     closed,
     setQuota: (q) => (quota = { ...quota, ...q }),
     limitNext: (status, extra = {}) => (limitNext = { status, extra }),
+    failRest: (status, extra = {}) => (failRest = { status, extra }),
     blockSearch: (kind, errors) => (blockedSearch = { kind, errors }),
+    blockKeys: (keys, errors) => keys.forEach((key) => blockedKeys.set(key, errors)),
+    hide: (id) => hidden.add(id),
+    restKeys: () => calls.filter((c) => c.kind === "rest").map((c) => c.key),
     detailIds: () => calls.filter((c) => c.kind === "details").flatMap((c) => c.ids),
   };
 }
 
 const sendThroughFetch = (token, payload, onHeaders) =>
   request("https://api.github.test/graphql", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) }, onHeaders);
+
+const restThroughFetch = (token, q, onHeaders) =>
+  request(`https://api.github.test/search/issues?per_page=50&sort=updated&order=desc&q=${encodeURIComponent(q)}`, { headers: { Authorization: `Bearer ${token}` } }, onHeaders);
 
 const settleAll = (gh) => {
   for (const n of [...gh.list.data.authored.nodes, ...gh.list.data.review.nodes]) n.commits.nodes[0].commit.statusCheckRollup = { state: "SUCCESS", contexts: { nodes: [] } };
@@ -62,10 +103,13 @@ const settleAll = (gh) => {
 const setup = (send = sendThroughFetch) => {
   const clock = { now: 1_800_000_000_000 };
   const gh = fakeGithub(clock);
-  const client = createGithubClient(send, () => clock.now);
+  const client = createGithubClient(send, () => clock.now, undefined, restThroughFetch);
   takeLiveGithubCounts();
   return { clock, gh, client };
 };
+
+const CLASSIC = "`acme` forbids access via a personal access token (classic). Please use a GitHub App, OAuth App, or a personal access token with fine-grained permissions.";
+const classicError = { type: "FORBIDDEN", message: CLASSIC, path: ["search", "nodes", 0] };
 
 test("unchanged pull requests keep their details; a changed one is read again", async () => {
   const { clock, gh, client } = setup();
@@ -346,4 +390,91 @@ test("a rate limit the host reports pauses background reads with the fallback ba
   assert.equal(client.pausedUntil(), FALLBACK_COOLDOWN_MS * 3);
   fail = false;
   await assert.rejects(client.fetchFolder("host", folder, false), (e) => e.kind === "rateLimited");
+});
+
+test("a listing GitHub answers never asks the search API", async () => {
+  const { gh, client } = setup();
+  await client.fetchFolder("t", folder, true);
+  assert.deepEqual(gh.restKeys(), []);
+});
+
+test("a classic token policy falls back to the search API and the folder stops warning", async () => {
+  const { gh, client } = setup();
+  const authored = gh.list.data.authored.nodes;
+  for (const n of authored) gh.hide(n.id);
+  gh.blockKeys(["authored"], [classicError]);
+  setConsentPeriod(true, "github-rest-test");
+  const items = await client.fetchFolder("t", folder, true);
+  setConsentPeriod(false, null);
+  assert.deepEqual(gh.restKeys(), ["authored"]);
+  assert.equal(items.filter((it) => it.section === "authored").length, authored.length);
+  assert.equal(client.warning(), null);
+  assert.ok(!gh.detailIds().some((id) => authored.some((n) => n.id === id)));
+  const counts = takeLiveGithubCounts();
+  assert.equal(counts.live_github_rest_fallbacks, 1);
+  assert.equal(counts.live_github_rest_recovered, authored.length);
+  assert.equal(counts.live_github_rest_failed, 0);
+  assert.equal(counts.live_github_blocked_listings, 1);
+});
+
+test("a blocked organization's pull requests merge with the ones GitHub still lists", async () => {
+  const { gh, client } = setup();
+  const review = gh.list.data.review.nodes;
+  for (const n of review) gh.hide(n.id);
+  gh.blockKeys(["review"], [classicError]);
+  const items = await client.fetchFolder("t", folder, true);
+  assert.deepEqual(gh.restKeys(), ["review"]);
+  const restored = items.filter((it) => review.some((n) => `github:${n.id}` === it.id));
+  assert.equal(restored.length, review.length);
+  assert.ok(restored.every((it) => it.pr.checks.length === 0 && it.pr.mergeable === "unknown" && it.pr.headRef === ""));
+  assert.ok(items.find((it) => it.section === "authored").pr.checks.length > 0);
+  assert.equal(client.warning(), null);
+});
+
+test("when the search API fails too the folder keeps the warning and the pull requests GitHub still lists", async () => {
+  const { gh, client } = setup();
+  for (const n of gh.list.data.authored.nodes) gh.hide(n.id);
+  gh.blockKeys(["authored"], [classicError]);
+  gh.failRest(500);
+  const items = await client.fetchFolder("t", folder, true);
+  assert.equal(client.warning()?.kind, "tokenBlocked");
+  assert.equal(items.filter((it) => it.section === "authored").length, 0);
+  assert.ok(items.length > 0);
+  assert.equal(takeLiveGithubCounts().live_github_rest_failed, 1);
+});
+
+test("a SAML block still shows after the search API recovers the rest", async () => {
+  const { gh, client } = setup();
+  for (const n of gh.list.data.authored.nodes) gh.hide(n.id);
+  const saml = { type: "FORBIDDEN", message: "Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization.", path: ["search", "nodes", 0] };
+  gh.blockKeys(["authored"], [classicError, saml]);
+  await client.fetchFolder("t", folder, true);
+  assert.equal(client.warning()?.kind, "sso");
+});
+
+test("a refresh with the same search API answers hands back the same pull requests", async () => {
+  const { clock, gh, client } = setup();
+  for (const n of gh.list.data.authored.nodes) gh.hide(n.id);
+  gh.blockKeys(["authored"], [classicError]);
+  const first = await client.fetchFolder("t", folder, false);
+  clock.now += LIST_SHARED_MS;
+  const second = await client.fetchFolder("t", folder, false);
+  assert.equal(second.length, first.length);
+  second.forEach((it, i) => assert.equal(it, first[i]));
+});
+
+test("a rate limit on the search API pauses only that API, until its Retry-After", async () => {
+  const { clock, gh, client } = setup();
+  for (const n of gh.list.data.authored.nodes) gh.hide(n.id);
+  gh.blockKeys(["authored"], [classicError]);
+  gh.failRest(429, { "retry-after": "120" });
+  await client.fetchFolder("t", folder, false);
+  assert.equal(client.warning()?.kind, "tokenBlocked");
+  const sent = gh.restKeys().length;
+  clock.now += LIST_SHARED_MS;
+  await client.fetchFolder("t", folder, false);
+  assert.equal(gh.restKeys().length, sent);
+  clock.now += 120_000;
+  await client.fetchFolder("t", folder, false);
+  assert.ok(gh.restKeys().length > sent);
 });

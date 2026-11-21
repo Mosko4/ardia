@@ -1,8 +1,8 @@
-import { blockedError, blockedNodes, changeKey, DETAILS_PAGE, detailNodes, GITHUB_DETAILS_QUERY, GITHUB_DIRECT_QUERY, GITHUB_SEARCH_QUERY, GITHUB_SEARCHES, GITHUB_STATE_QUERY, listingOf, prItem, sectioned, VIEWER_QUERY, withStacks, type DetailsResponse, type GithubResponse, type ListedPR, type Listing, type RateLimitInfo, type SearchResponse } from "./github";
+import { blockedError, blockedNodes, changeKey, classicPat, classicPatBlocked, DETAILS_PAGE, detailNodes, GITHUB_DETAILS_QUERY, GITHUB_DIRECT_QUERY, GITHUB_SEARCH_QUERY, GITHUB_SEARCHES, GITHUB_STATE_QUERY, listingOf, prItem, restItems, restQuery, sectioned, VIEWER_QUERY, withStacks, type DetailsResponse, type GithubResponse, type GraphqlError, type ListedPR, type Listing, type RateLimitInfo, type RestSearch, type SearchResponse } from "./github";
 import { createGithubLimits, graphqlRateLimited, retryAtFromHeaders, type GithubLimits, type HeaderReader } from "./githubLimits";
 import { LiveError, type CompletionState, type LiveFolder, type LiveItem, type PullRequestSection } from "./types";
 import { consentToken, type ConsentToken } from "../telemetry/choice";
-import { noteLiveGithubBlocked, noteLiveGithubDetails, noteLiveGithubRequest } from "../telemetry/liveGithub";
+import { noteLiveGithubBlocked, noteLiveGithubDetails, noteLiveGithubRequest, noteLiveGithubRest } from "../telemetry/liveGithub";
 
 export const LIST_SHARED_MS = 30_000;
 export const DETAILS_FRESH_MS = 10 * 60_000;
@@ -10,9 +10,11 @@ export const PENDING_FRESH_MS = 60_000;
 
 export type GraphqlPayload = { query: string; variables: Record<string, unknown> };
 export type GithubSend = (scope: string, payload: GraphqlPayload, onHeaders: (headers: HeaderReader) => void) => Promise<unknown>;
+export type GithubRestSend = (scope: string, q: string, onHeaders: (headers: HeaderReader) => void) => Promise<unknown>;
 
 type Reply = { data?: { rateLimit?: RateLimitInfo | null } | null; errors?: { type?: string; message: string }[] };
-type Listed = Listing & { keys: Map<string, string | null>; blocked: LiveError | null };
+type Listed = Listing & { keys: Map<string, string | null>; blocked: LiveError | null; rest: Map<string, LiveItem> };
+type Fallback = { items: Map<string, LiveItem>; authored: string[]; review: string[]; direct: string[] };
 type Searches = { authored: SearchResponse; review: SearchResponse; direct: SearchResponse };
 type Detail = {
   key: string | null;
@@ -33,22 +35,17 @@ const sameJson = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JS
 
 const unsettled = (item: LiveItem | null) => !!item?.pr?.checks.some((c) => c.state === "pending" || c.state === "queued");
 
-function toListed({ authored, review, direct }: Searches, consent: ConsentToken | null): Listed {
-  const nodes = (res: SearchResponse) => ({ nodes: res.data?.search.nodes ?? [] });
-  const json: GithubResponse = { data: { authored: nodes(authored), review: nodes(review), direct: nodes(direct) } };
-  const keys = new Map<string, string | null>();
-  for (const n of [...json.data!.authored.nodes, ...json.data!.review.nodes]) if (n && "id" in n && n.id && !keys.has(n.id)) keys.set(n.id, changeKey(n as ListedPR));
-  const blocked = blockedError([authored, review, direct].flatMap((res) => blockedNodes(res.errors)));
-  if (blocked) noteLiveGithubBlocked(consent);
-  return { ...listingOf(json), keys, blocked };
-}
-
-export function createGithubClient(send: GithubSend, clock: () => number = Date.now, limits: GithubLimits = createGithubLimits(clock)) {
+export function createGithubClient(send: GithubSend, clock: () => number = Date.now, limits: GithubLimits = createGithubLimits(clock), rest: GithubRestSend | null = null) {
   let current: Account | null = null;
+
+  const restScope = (scope: string) => `${scope}:rest`;
 
   const account = (scope: string): Account => {
     if (current?.scope === scope) return current;
-    if (current) limits.forget(current.scope);
+    if (current) {
+      limits.forget(current.scope);
+      limits.forget(restScope(current.scope));
+    }
     return (current = { scope, list: null, details: new Map(), pending: new Map(), blocked: null });
   };
 
@@ -83,20 +80,86 @@ export function createGithubClient(send: GithubSend, clock: () => number = Date.
     });
   }
 
+  async function restSearch(send: GithubRestSend, a: Account, interactive: boolean, kind: keyof typeof GITHUB_SEARCHES): Promise<LiveItem[]> {
+    const scope = restScope(a.scope);
+    return limits.withSlot(async () => {
+      if (limits.blockedUntil(scope, interactive) !== null) return [];
+      let headers: HeaderReader | null = null;
+      noteLiveGithubRequest("sent");
+      try {
+        const json = (await send(a.scope, restQuery(GITHUB_SEARCHES[kind]), (h) => {
+          headers = h;
+          limits.observe(scope, h);
+        })) as RestSearch;
+        limits.succeeded(scope);
+        return restItems(json);
+      } catch (error) {
+        if (!(error instanceof LiveError) || error.kind !== "rateLimited") return [];
+        noteLiveGithubRequest("rateLimited");
+        limits.rateLimited(scope, retryAtFromHeaders(headers, clock()));
+        return [];
+      }
+    });
+  }
+
+  async function restFallback(a: Account, interactive: boolean, blocked: readonly GraphqlError[], searches: Searches): Promise<Fallback> {
+    const empty: Fallback = { items: new Map(), authored: [], review: [], direct: [] };
+    if (!rest || !classicPatBlocked(blocked)) return empty;
+    if (limits.blockedUntil(restScope(a.scope), interactive) !== null) return empty;
+    const kinds = (["authored", "review", "direct"] as const).filter((kind) => classicPatBlocked(blockedNodes(searches[kind].errors)));
+    const recovered = await Promise.all(kinds.map((kind) => restSearch(rest, a, interactive, kind)));
+    const out: Fallback = { items: new Map(), authored: [], review: [], direct: [] };
+    kinds.forEach((kind, i) => {
+      for (const item of recovered[i]!) {
+        const id = item.id.slice("github:".length);
+        out.items.set(id, item);
+        out[kind].push(id);
+      }
+    });
+    noteLiveGithubRest(out.items.size);
+    return out;
+  }
+
+  async function toListed(a: Account, interactive: boolean, searches: Searches, consent: ConsentToken | null): Promise<Listed> {
+    const nodes = (res: SearchResponse) => ({ nodes: res.data?.search.nodes ?? [] });
+    const json: GithubResponse = { data: { authored: nodes(searches.authored), review: nodes(searches.review), direct: nodes(searches.direct) } };
+    const keys = new Map<string, string | null>();
+    for (const n of [...json.data!.authored.nodes, ...json.data!.review.nodes]) if (n && "id" in n && n.id && !keys.has(n.id)) keys.set(n.id, changeKey(n as ListedPR));
+    const blocked = [searches.authored, searches.review, searches.direct].flatMap((res) => blockedNodes(res.errors));
+    const fallback = await restFallback(a, interactive, blocked, searches);
+    const listing = listingOf(json);
+    listing.authored.push(...fallback.authored);
+    listing.review.push(...fallback.review);
+    for (const id of fallback.direct) listing.direct.add(id);
+    if (blocked.length) noteLiveGithubBlocked(consent);
+    const remaining = blocked.filter((error) => !(fallback.items.size && classicPat(error)));
+    return { ...listing, keys, blocked: blockedError(remaining), rest: fallback.items };
+  }
+
+  function applyRest(a: Account, listed: Listed) {
+    const at = clock();
+    for (const [id, item] of listed.rest) {
+      const previous = a.details.get(id);
+      if (previous && sameJson(previous.item, item)) a.details.set(id, { ...previous, key: null, at });
+      else a.details.set(id, { key: null, at, item, bySection: {}, stacked: null });
+    }
+  }
+
   function list(a: Account, interactive: boolean): Promise<Listed> {
     const shared = a.list;
     if (shared && (!shared.done || (!interactive && clock() - shared.at < LIST_SHARED_MS))) return shared.promise;
     const consent = consentToken();
     const search = (query: string, q: string) => graphql<SearchResponse & Reply>(a.scope, interactive, query, { q });
     const searches = Promise.all([search(GITHUB_SEARCH_QUERY, GITHUB_SEARCHES.authored), search(GITHUB_SEARCH_QUERY, GITHUB_SEARCHES.review), search(GITHUB_DIRECT_QUERY, GITHUB_SEARCHES.direct)]);
-    const entry = { at: clock(), done: false, promise: searches.then(([authored, review, direct]) => toListed({ authored, review, direct }, consent)) };
+    const entry = { at: clock(), done: false, promise: searches.then(([authored, review, direct]) => toListed(a, interactive, { authored, review, direct }, consent)) };
     a.list = entry;
     entry.promise.then(
       (listed) => {
         entry.done = true;
         entry.at = clock();
         a.blocked = listed.blocked;
-        for (const id of a.details.keys()) if (!listed.keys.has(id)) a.details.delete(id);
+        applyRest(a, listed);
+        for (const id of a.details.keys()) if (!listed.keys.has(id) && !listed.rest.has(id)) a.details.delete(id);
       },
       () => {
         if (a.list === entry) a.list = null;
@@ -132,8 +195,9 @@ export function createGithubClient(send: GithubSend, clock: () => number = Date.
     const now = clock();
     const stale: string[] = [];
     const waits = new Set<Promise<void>>();
+    const needed = ids.filter((id) => !listed.rest.has(id));
     let joined = 0;
-    for (const id of ids) {
+    for (const id of needed) {
       const detail = a.details.get(id);
       const key = listed.keys.get(id) ?? null;
       if (detail && key !== null && detail.key === key && now - detail.at < (unsettled(detail.item) ? PENDING_FRESH_MS : DETAILS_FRESH_MS)) continue;
@@ -142,7 +206,7 @@ export function createGithubClient(send: GithubSend, clock: () => number = Date.
       else stale.push(id);
     }
     for (let i = 0; i < stale.length; i += DETAILS_PAGE) waits.add(readPage(a, interactive, listed, stale.slice(i, i + DETAILS_PAGE)));
-    noteLiveGithubDetails(stale.length, ids.length - stale.length - joined);
+    noteLiveGithubDetails(stale.length, needed.length - stale.length - joined);
     await Promise.all(waits);
   }
 

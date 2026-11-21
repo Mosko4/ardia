@@ -112,6 +112,7 @@ function pick(route, fallback) {
 
 function defaultFor(host, method, path, body) {
   if (host === "api.github.com") {
+    if (path === "/search/issues") return ["github", "restSearch"];
     const { query, variables } = JSON.parse(body);
     if (query.includes("search(")) return ["github", /(^|\s)author:@me(\s|$)/.test(variables.q) ? "folder" : "emptySearch"];
     return ["github", query.includes("LiveFolderDetails") ? "details" : "viewer"];
@@ -180,6 +181,18 @@ test("GitHub: a token connects from the documented viewer reply and a folder map
   assert.deepEqual(items.map((it) => [it.title, it.url, it.pr.repo, it.pr.checks[0].state]), [["Amazing new feature", "https://github.com/octocat/Hello-World/pull/1347", "octocat/Hello-World", "success"]]);
   const graphql = requests.filter((r) => r.host === "api.github.com");
   assert.ok(graphql.every((r) => r.method === "POST" && r.headers.authorization === `Bearer ${CREDENTIALS.github}` && r.headers.accept === "application/json"));
+});
+
+test("GitHub: a classic token policy falls back to the search API, which the host allows and authorizes", async () => {
+  await linux.connectGithub(CREDENTIALS.github);
+  serve("api.github.com /graphql", "classicBlocked");
+  const items = await SOURCES.github.fetch(prFolder);
+  assert.deepEqual(items.map((it) => [it.id, it.pr.repo, it.pr.number, it.pr.checks.length, it.pr.mergeable]), [["github:PR_kwDOAJy2Ks5vZ3Qx", "octocat/Hello-World", 1347, 0, "unknown"]]);
+  assert.equal(SOURCES.github.warning(), null);
+  const rest = requests.filter((r) => r.host === "api.github.com" && r.path === "/search/issues");
+  assert.equal(rest.length, 3);
+  assert.ok(rest.every((r) => r.method === "GET" && r.headers.authorization === `Bearer ${CREDENTIALS.github}` && r.search.includes("per_page=50") && r.search.includes("sort=updated&order=desc")));
+  assert.ok(!requests.some((r) => r.host === "api.github.com" && r.path === "/graphql" && r.body.includes("LiveFolderDetails")));
 });
 
 test("GitHub: bad credentials, the primary and secondary rate limits and SAML enforcement keep their meaning", async () => {
