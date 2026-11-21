@@ -4,7 +4,10 @@ import { consentOrNow, countFor } from "./countFor";
 const NONE = { sent: 0, held: 0, rateLimited: 0, detailsFetched: 0, detailsReused: 0, blockedListings: 0, restFallbacks: 0, restRecovered: 0, restFailed: 0 };
 let counts = { ...NONE };
 
-export const noteLiveGithubRequest = (outcome: "sent" | "held" | "rateLimited") => void counts[outcome]++;
+export const noteLiveGithubRequest = (outcome: "sent" | "held" | "rateLimited", consent?: ConsentToken | null) => {
+  if (consent === undefined) counts[outcome]++;
+  else countFor(consent, () => void counts[outcome]++);
+};
 
 export const noteLiveGithubBlocked = (consent?: ConsentToken | null) => countFor(consentOrNow(consent), () => void counts.blockedListings++);
 
@@ -13,10 +16,12 @@ export function noteLiveGithubDetails(fetched: number, reused: number) {
   counts.detailsReused += reused;
 }
 
-export function noteLiveGithubRest(recovered: number) {
-  counts.restFallbacks++;
-  counts.restRecovered += recovered;
-  if (!recovered) counts.restFailed++;
+export function noteLiveGithubRest(consent: ConsentToken | null, recovered: number, failed: number) {
+  countFor(consent, () => {
+    counts.restFallbacks++;
+    counts.restRecovered += recovered;
+    counts.restFailed += failed;
+  });
 }
 
 export function takeLiveGithubCounts() {

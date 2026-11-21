@@ -105,12 +105,8 @@ const ORG_SSO = /SAML|single sign-on/i;
 
 const CLASSIC_PAT = /forbids access via a personal access token \(classic\)/i;
 
-export function classicPat(error: GraphqlError): boolean {
-  return CLASSIC_PAT.test(error.message);
-}
-
-export function classicPatBlocked(blocked: readonly GraphqlError[]): boolean {
-  return blocked.some(classicPat);
+export function isClassicPat(error: GraphqlError): boolean {
+  return error.type === "FORBIDDEN" && CLASSIC_PAT.test(error.message);
 }
 
 export function blockedNodes(errors: readonly GraphqlError[] | undefined): GraphqlError[] {
@@ -183,7 +179,7 @@ export function prItem(raw: RawPR, section?: PullRequestSection): LiveItem {
   };
 }
 
-export type RestIssue = {
+type RestIssue = {
   node_id?: string;
   number: number;
   title: string;
@@ -196,7 +192,7 @@ export type RestIssue = {
   pull_request?: { merged_at?: string | null } | null;
 };
 
-export type RestSearch = { items?: RestIssue[] };
+export type RestSearch = { items: RestIssue[]; incomplete_results?: boolean };
 
 export const restQuery = (q: string) => q.replace(/\s*sort:updated-desc/, "");
 
@@ -207,7 +203,7 @@ function repoOf(repositoryUrl: string | undefined): string | null {
   return owner && name ? `${owner}/${name}` : null;
 }
 
-export function restPr(issue: RestIssue): RawPR | null {
+function restPr(issue: RestIssue): RawPR | null {
   const repo = repoOf(issue.repository_url);
   if (!issue.node_id || !repo || !issue.pull_request) return null;
   return {
@@ -234,7 +230,7 @@ export function restPr(issue: RestIssue): RawPR | null {
 }
 
 export function restItems(json: RestSearch): LiveItem[] {
-  return (json.items ?? []).flatMap((issue) => {
+  return json.items.flatMap((issue) => {
     const raw = restPr(issue);
     return raw ? [prItem(raw)] : [];
   });

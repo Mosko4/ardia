@@ -1,4 +1,4 @@
-import { blockedError, blockedNodes, changeKey, classicPat, classicPatBlocked, DETAILS_PAGE, detailNodes, GITHUB_DETAILS_QUERY, GITHUB_DIRECT_QUERY, GITHUB_SEARCH_QUERY, GITHUB_SEARCHES, GITHUB_STATE_QUERY, listingOf, prItem, restItems, restQuery, sectioned, VIEWER_QUERY, withStacks, type DetailsResponse, type GithubResponse, type GraphqlError, type ListedPR, type Listing, type RateLimitInfo, type RestSearch, type SearchResponse } from "./github";
+import { blockedError, blockedNodes, changeKey, DETAILS_PAGE, detailNodes, GITHUB_DETAILS_QUERY, GITHUB_DIRECT_QUERY, GITHUB_SEARCH_QUERY, GITHUB_SEARCHES, GITHUB_STATE_QUERY, isClassicPat, listingOf, prItem, restItems, restQuery, sectioned, VIEWER_QUERY, withStacks, type DetailsResponse, type GithubResponse, type ListedPR, type Listing, type RateLimitInfo, type RestSearch, type SearchResponse } from "./github";
 import { createGithubLimits, graphqlRateLimited, retryAtFromHeaders, type GithubLimits, type HeaderReader } from "./githubLimits";
 import { LiveError, type CompletionState, type LiveFolder, type LiveItem, type PullRequestSection } from "./types";
 import { consentToken, type ConsentToken } from "../telemetry/choice";
@@ -14,8 +14,10 @@ export type GithubRestSend = (scope: string, q: string, onHeaders: (headers: Hea
 
 type Reply = { data?: { rateLimit?: RateLimitInfo | null } | null; errors?: { type?: string; message: string }[] };
 type Listed = Listing & { keys: Map<string, string | null>; blocked: LiveError | null; rest: Map<string, LiveItem> };
-type Fallback = { items: Map<string, LiveItem>; authored: string[]; review: string[]; direct: string[] };
-type Searches = { authored: SearchResponse; review: SearchResponse; direct: SearchResponse };
+const SEARCH_KINDS = ["authored", "review", "direct"] as const;
+type SearchKind = (typeof SEARCH_KINDS)[number];
+type Searches = Record<SearchKind, SearchResponse>;
+type RestResult = { items: LiveItem[]; complete: boolean } | "held" | "failed";
 type Detail = {
   key: string | null;
   at: number;
@@ -80,44 +82,29 @@ export function createGithubClient(send: GithubSend, clock: () => number = Date.
     });
   }
 
-  async function restSearch(send: GithubRestSend, a: Account, interactive: boolean, kind: keyof typeof GITHUB_SEARCHES): Promise<LiveItem[]> {
+  function restSearch(sendRest: GithubRestSend, a: Account, interactive: boolean, kind: SearchKind, consent: ConsentToken | null): Promise<RestResult> {
     const scope = restScope(a.scope);
     return limits.withSlot(async () => {
-      if (limits.blockedUntil(scope, interactive) !== null) return [];
+      if (limits.blockedUntil(scope, interactive) !== null) return "held";
       let headers: HeaderReader | null = null;
-      noteLiveGithubRequest("sent");
+      noteLiveGithubRequest("sent", consent);
       try {
-        const json = (await send(a.scope, restQuery(GITHUB_SEARCHES[kind]), (h) => {
+        const json = (await sendRest(a.scope, restQuery(GITHUB_SEARCHES[kind]), (h) => {
           headers = h;
           limits.observe(scope, h);
         })) as RestSearch;
+        if (!Array.isArray(json?.items)) return "failed";
+        const items = restItems(json);
         limits.succeeded(scope);
-        return restItems(json);
+        return { items, complete: json.incomplete_results !== true };
       } catch (error) {
-        if (!(error instanceof LiveError) || error.kind !== "rateLimited") return [];
-        noteLiveGithubRequest("rateLimited");
-        limits.rateLimited(scope, retryAtFromHeaders(headers, clock()));
-        return [];
+        if (error instanceof LiveError && error.kind === "rateLimited") {
+          noteLiveGithubRequest("rateLimited", consent);
+          limits.rateLimited(scope, retryAtFromHeaders(headers, clock()));
+        }
+        return "failed";
       }
     });
-  }
-
-  async function restFallback(a: Account, interactive: boolean, blocked: readonly GraphqlError[], searches: Searches): Promise<Fallback> {
-    const empty: Fallback = { items: new Map(), authored: [], review: [], direct: [] };
-    if (!rest || !classicPatBlocked(blocked)) return empty;
-    if (limits.blockedUntil(restScope(a.scope), interactive) !== null) return empty;
-    const kinds = (["authored", "review", "direct"] as const).filter((kind) => classicPatBlocked(blockedNodes(searches[kind].errors)));
-    const recovered = await Promise.all(kinds.map((kind) => restSearch(rest, a, interactive, kind)));
-    const out: Fallback = { items: new Map(), authored: [], review: [], direct: [] };
-    kinds.forEach((kind, i) => {
-      for (const item of recovered[i]!) {
-        const id = item.id.slice("github:".length);
-        out.items.set(id, item);
-        out[kind].push(id);
-      }
-    });
-    noteLiveGithubRest(out.items.size);
-    return out;
   }
 
   async function toListed(a: Account, interactive: boolean, searches: Searches, consent: ConsentToken | null): Promise<Listed> {
@@ -125,20 +112,47 @@ export function createGithubClient(send: GithubSend, clock: () => number = Date.
     const json: GithubResponse = { data: { authored: nodes(searches.authored), review: nodes(searches.review), direct: nodes(searches.direct) } };
     const keys = new Map<string, string | null>();
     for (const n of [...json.data!.authored.nodes, ...json.data!.review.nodes]) if (n && "id" in n && n.id && !keys.has(n.id)) keys.set(n.id, changeKey(n as ListedPR));
-    const blocked = [searches.authored, searches.review, searches.direct].flatMap((res) => blockedNodes(res.errors));
-    const fallback = await restFallback(a, interactive, blocked, searches);
     const listing = listingOf(json);
-    listing.authored.push(...fallback.authored);
-    listing.review.push(...fallback.review);
-    for (const id of fallback.direct) listing.direct.add(id);
-    if (blocked.length) noteLiveGithubBlocked(consent);
-    const remaining = blocked.filter((error) => !(fallback.items.size && classicPat(error)));
-    return { ...listing, keys, blocked: blockedError(remaining), rest: fallback.items };
+    const restItemsById = new Map<string, LiveItem>();
+    const blocks = SEARCH_KINDS.map((kind) => ({ kind, errors: blockedNodes(searches[kind].errors) })).filter(({ errors }) => errors.length);
+    if (blocks.length) noteLiveGithubBlocked(consent);
+    const affected = blocks.filter(({ errors }) => errors.some(isClassicPat));
+    if (!rest || !affected.length) return { ...listing, keys, blocked: blockedError(blocks.flatMap(({ errors }) => errors)), rest: restItemsById };
+
+    const sendRest = rest;
+    const results = await Promise.all(affected.map(async ({ kind }) => ({ kind, result: await restSearch(sendRest, a, interactive, kind, consent) })));
+    const recovered = new Set<SearchKind>();
+    let attempted = 0;
+    let failed = 0;
+    for (const { kind, result } of results) {
+      if (result === "held") continue;
+      attempted++;
+      if (result === "failed") {
+        failed++;
+        continue;
+      }
+      const ids = new Set(listing[kind]);
+      for (const item of result.items) {
+        const id = item.id.slice("github:".length);
+        if (ids.has(id)) continue;
+        ids.add(id);
+        if (kind === "direct") listing.direct.add(id);
+        else {
+          listing[kind].push(id);
+          if (!keys.has(id)) restItemsById.set(id, item);
+        }
+        if (result.complete && (kind !== "direct" || listing.review.includes(id))) recovered.add(kind);
+      }
+    }
+    if (attempted) noteLiveGithubRest(consent, restItemsById.size, failed);
+    const remaining = blocks.flatMap(({ kind, errors }) => recovered.has(kind) ? errors.filter((error) => !isClassicPat(error)) : errors);
+    return { ...listing, keys, blocked: blockedError(remaining), rest: restItemsById };
   }
 
   function applyRest(a: Account, listed: Listed) {
     const at = clock();
     for (const [id, item] of listed.rest) {
+      a.pending.delete(id);
       const previous = a.details.get(id);
       if (previous && sameJson(previous.item, item)) a.details.set(id, { ...previous, key: null, at });
       else a.details.set(id, { key: null, at, item, bySection: {}, stacked: null });
@@ -175,6 +189,7 @@ export function createGithubClient(send: GithubSend, clock: () => number = Date.
       const at = clock();
       const byId = new Map(nodes.map((n) => [n.id, n]));
       for (const id of ids) {
+        if (a.pending.get(id) !== done) continue;
         const node = byId.get(id);
         const item = node && node.state === "OPEN" ? prItem(node) : null;
         const previous = a.details.get(id);
