@@ -206,12 +206,12 @@ export function installOfficialPlugin(name: string, options: InstallOptions = {}
 function askToInstall(name: string, options: InstallOptions): Promise<InstallResult> {
   releaseOrphanedConsent();
   if (currentPlugins().consent) return Promise.resolve({ ok: false, reason: ALREADY_ASKING });
-  const target = consentTarget(name);
+  const target = consentTarget(name, true);
   if (!target?.manifest || !target.hash) {
     const listing = candidateOf(currentPlugins(), name) ?? currentPlugins().listings[name];
     return Promise.resolve({ ok: false, reason: listing?.problems[0] ?? "It can't load." });
   }
-  if (!requestPluginConsent(name)) return Promise.resolve({ ok: false, reason: "Can't install it right now." });
+  if (!requestPluginConsent(name, true)) return Promise.resolve({ ok: false, reason: "Can't install it right now." });
   options.onConsent?.(currentPlugins().consent!.id);
   const done = waitForInstall(name);
   if (options.showSheet !== false) openSettings("plugins", null, name);

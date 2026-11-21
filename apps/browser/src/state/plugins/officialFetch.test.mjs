@@ -283,3 +283,44 @@ test("with no listing left, removing an official name still keeps its data; a us
   assert.equal(P().consent.hash, P().listings.cli.hash, "the user's own folder is what its row asks about");
   lifecycle.dismissPluginConsent("cli");
 });
+
+test("Install from the official row asks about the official download even beside a user folder of the same name; a Remove whose listing changed meanwhile stops", async () => {
+  usePlugins.setState({ records: {}, candidates: {}, fetches: {}, consent: null });
+  stub.docs.set("plugins.json", JSON.stringify({ version: 1, plugins: {} }));
+  reload();
+  const mine = JSON.stringify({ manifest: 1, name: "cli", title: "My CLI", version: "9.0.0" });
+  host.folders = [
+    { name: "cli", status: "ok", text: mine, folderId: "7:7" },
+    { name: "cli", status: "missing", official: true, candidateOnly: true, candidate: { folderId: PINNED.folderId, text: NEW, legacyHash: officialLegacyHash(NEW), version: "0.5.0" } },
+  ];
+  await lifecycle.rescanPlugins(consentToken());
+  await settle();
+  const asked = installOfficialPlugin("cli", { showSheet: false });
+  await settle();
+  assert.equal(P().consent?.hash, P().candidates.cli.hash, "the official row asks about the official copy");
+  lifecycle.dismissPluginConsent("cli");
+  await asked;
+  host.removed.length = 0;
+  const stopped = await lifecycle.removePlugin("cli", undefined, true);
+  assert.equal(stopped.ok, false, "the dialog was for the official plugin, and the user folder is what's listed now");
+  assert.deepEqual(host.removed, []);
+});
+
+test("an active copy whose SHA-256 has left the pin is kept only by its own approval and is never offered for a first approval", async () => {
+  usePlugins.setState({ records: {}, candidates: {}, fetches: {}, consent: null });
+  stub.docs.set("plugins.json", JSON.stringify({ version: 1, plugins: {} }));
+  reload();
+  const oldSha = `official-${"9".repeat(64)}`;
+  host.folders = [{ name: "cli", status: "ok", official: true, legacy: true, folderId: oldSha, text: OLD }];
+  host.officialFetchResults.cli = { ok: false, code: "offline", reason: "offline" };
+  await lifecycle.rescanPlugins(consentToken());
+  await settle();
+  assert.equal(P().listings.cli, undefined, "no approval on record, so it isn't listed");
+  assert.equal(lifecycle.requestPluginConsent("cli"), false);
+  stub.docs.set("plugins.json", JSON.stringify({ version: 1, plugins: { cli: { enabled: true, approved: manifestHash(OLD, oldSha), values: {}, applied: {} } } }));
+  reload();
+  await lifecycle.rescanPlugins(consentToken());
+  await settle();
+  assert.ok(activeManifest(P(), "cli"), "its own approval keeps it running until the pinned one is approved");
+  delete host.officialFetchResults.cli;
+});

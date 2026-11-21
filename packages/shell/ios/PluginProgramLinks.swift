@@ -119,7 +119,9 @@ enum PluginProgramLinks {
     case .failure: clean = false
     case .success(let linked): clean = linked.refused.isEmpty
     }
-    if !clean, let copy, !PluginPrograms.currentHolds(plugin: name, places: places, digest: copy.payloadDigest) {
+    if !clean, let copy,
+      PluginPrograms.currentIsDamaged(plugin: name, places: places, version: spec["version"] as? String, approved: approved, digest: copy.payloadDigest)
+    {
       PluginPrograms.withdraw(plugin: name, programs: programs.map(\.name), places: places, keepCopy: true)
     }
     switch result {

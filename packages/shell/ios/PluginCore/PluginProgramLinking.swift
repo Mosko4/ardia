@@ -83,6 +83,14 @@ extension PluginPrograms {
     return version == base || version.hasPrefix(base + "-r") ? folder : nil
   }
 
+  static func currentIsDamaged(plugin: String, places: ProgramPlaces, version: String?, approved: String, digest: String) -> Bool {
+    let pluginStore = places.pluginStore(plugin)
+    guard let current = linkTarget((pluginStore as NSString).appendingPathComponent(currentName)), !current.contains("/") else { return false }
+    let base = versionFolderName(version: version, approved: approved)
+    guard current == base || current.hasPrefix(base + "-r") else { return false }
+    return !currentHolds(plugin: plugin, places: places, digest: digest)
+  }
+
   static func currentHolds(plugin: String, places: ProgramPlaces, digest: String) -> Bool {
     let pluginStore = places.pluginStore(plugin)
     guard let version = linkTarget((pluginStore as NSString).appendingPathComponent(currentName)), !version.contains("/") else { return false }

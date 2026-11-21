@@ -193,18 +193,19 @@ function closeChangedConsent() {
   settleInstall(asked.name, { ok: false, reason: "It changed while installing. Try again." });
 }
 
-export function consentTarget(name: string): PluginListing | undefined {
+export function consentTarget(name: string, official = false): PluginListing | undefined {
   const s = currentPlugins();
   const listing = Object.hasOwn(s.listings, name) ? s.listings[name] : undefined;
-  if (listing && !listing.official) return listing;
+  if (!official && listing && !listing.official) return listing;
   const candidate = Object.hasOwn(s.candidates, name) ? s.candidates[name] : undefined;
   if (candidate?.manifest && candidate.hash) return candidate;
+  if (official && !listing?.official) return undefined;
   if (listing?.legacy) return undefined;
   return listing;
 }
 
-export function requestPluginConsent(name: string): boolean {
-  const target = consentTarget(name);
+export function requestPluginConsent(name: string, official = false): boolean {
+  const target = consentTarget(name, official);
   if (currentPlugins().consent || !target?.manifest || !target.hash) return false;
   usePlugins.setState({ consent: { id: ++lastConsentId, name, hash: target.hash } });
   return true;
@@ -229,7 +230,8 @@ export function confirmConsentRequest(id: number): boolean {
 }
 
 export function enablePlugin(name: string, hash: string): boolean {
-  const listing = consentTarget(name);
+  const matched = consentListing(currentPlugins(), name, hash);
+  const listing = matched?.legacy ? undefined : matched;
   const asked = currentPlugins().consent;
   if (!listing?.manifest || listing.hash !== hash || asked?.name !== name || asked.hash !== hash || removing.has(name)) return false;
   const candidate = currentPlugins().candidates[name] === listing;
@@ -316,10 +318,15 @@ const removing = new Set<string>();
 const secretsLeftReason = (name: string, secrets: SecretsCleared) =>
   `Its files are removed, but ${secrets.remaining.length === 1 ? "1 secret is" : secrets.remaining.length ? `${secrets.remaining.length} secrets are` : "its secrets may be"} still in your Keychain, under ardia.plugin.${name}. Delete them in Keychain Access.`;
 
-export async function removePlugin(name: string, mayGoOn: () => boolean = () => true): Promise<{ ok: boolean; removed?: boolean; reason?: string }> {
-  if (removing.has(name)) return { ok: false, reason: "It is already being removed." };
+export const removesAsOfficial = (name: string): boolean => {
   const listed = Object.hasOwn(currentPlugins().listings, name) ? currentPlugins().listings[name] : undefined;
-  const official = listed ? !!listed.official : !!currentPlugins().pinned?.some((p) => p.name === name) || Object.hasOwn(currentPlugins().candidates, name);
+  return listed ? !!listed.official : !!currentPlugins().pinned?.some((p) => p.name === name) || Object.hasOwn(currentPlugins().candidates, name);
+};
+
+export async function removePlugin(name: string, mayGoOn: () => boolean = () => true, expectOfficial?: boolean): Promise<{ ok: boolean; removed?: boolean; reason?: string }> {
+  if (removing.has(name)) return { ok: false, reason: "It is already being removed." };
+  const official = removesAsOfficial(name);
+  if (expectOfficial !== undefined && expectOfficial !== official) return { ok: false, reason: "It changed while you were deciding. Try again." };
   const consent = consentToken();
   removing.add(name);
   try {

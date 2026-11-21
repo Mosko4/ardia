@@ -201,7 +201,12 @@ final class OfficialVerification {
       return known.digest
     }
     lock.unlock()
-    guard let archiveStamp = Self.stamp(archive), let copyStamp = Self.treeStamp(copy) else { return nil }
+    guard let archiveStamp = Self.stamp(archive), let copyStamp = Self.treeStamp(copy) else {
+      lock.lock()
+      verified.removeValue(forKey: key)
+      lock.unlock()
+      return nil
+    }
     let stamp = Stamp(archive: archiveStamp, copy: copyStamp)
     lock.lock()
     if !fresh, let known = verified[key], known.stamp == stamp {

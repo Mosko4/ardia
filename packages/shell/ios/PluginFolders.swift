@@ -123,6 +123,7 @@ struct PluginFolders {
     if let active {
       let read = Self.manifestText(active.path)
       result = ["name": entry.name, "status": read.status, "official": true, "folderId": active.folderId]
+      if active.sha != entry.sha256 { result!["legacy"] = true }
       if let text = read.text {
         result!["text"] = text
         if active.sha == entry.sha256 { result!["legacyHash"] = PluginFiles.approvalHash(text: text, folderId: Self.legacyId) }

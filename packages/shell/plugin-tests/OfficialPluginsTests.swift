@@ -343,6 +343,17 @@ final class OfficialPluginsTests: XCTestCase {
     XCTAssertNil(store.copy("tool", sha: sha), "a download that isn't the pinned SHA-256 vouches for nothing")
   }
 
+  func testAnEarlierCopyIsntTakenForADamagedNewOne() throws {
+    let old = try makeFolder("0.4.0", say: "old")
+    defer { old.close() }
+    _ = try install(old, version: "0.4.0", identity: OfficialPin.legacyFolderId)
+    XCTAssertFalse(PluginPrograms.currentIsDamaged(plugin: "tool", places: places, version: "0.5.0", approved: String(repeating: "b", count: 64), digest: String(repeating: "c", count: 64)), "a failed update leaves the earlier copy's ardia on PATH")
+    let version = try XCTUnwrap(PluginPrograms.linkTarget("\(places.store)/tool/current"))
+    try "#!/bin/sh\necho swapped\n".write(toFile: "\(places.store)/tool/\(version)/bin/tool", atomically: false, encoding: .utf8)
+    guard case .text(let text) = PluginFiles.readManifest(in: OpenedFolder(fd: old.fd, path: old.path, id: OfficialPin.legacyFolderId)) else { return XCTFail("no manifest") }
+    XCTAssertTrue(PluginPrograms.currentIsDamaged(plugin: "tool", places: places, version: "0.4.0", approved: PluginFiles.approvalHash(text: text, folderId: OfficialPin.legacyFolderId), digest: String(repeating: "c", count: 64)))
+  }
+
   func testTurningAnOfficialPluginOffKeepsItsCopySoItCanTurnBackOn() throws {
     let old = try makeFolder("0.4.0", say: "old")
     defer { old.close() }
