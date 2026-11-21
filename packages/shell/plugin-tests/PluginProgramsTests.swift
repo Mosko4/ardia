@@ -324,7 +324,7 @@ final class PluginProgramsTests: XCTestCase {
     let approved = PluginFiles.approvalHash(text: text, folderId: opened.id)
     let result = PluginPrograms.install(plugin: "greeter", from: opened, approved: approved, version: "1.0.0", programs: [tool], places: places, expectedDigest: signed)
     guard case .failure(let refusal) = result else { return XCTFail("a changed payload installed") }
-    XCTAssertEqual(refusal.reason, "its files don't match the ones this Ardia was signed with")
+    XCTAssertEqual(refusal.reason, "its files don't match the ones Ardia downloaded and checked")
     XCTAssertEqual(versions(), [])
     XCTAssertNil(PluginPrograms.linkTarget(binPath))
     XCTAssertEqual(chmod("\(folder)/bin/hello", 0o755), 0)

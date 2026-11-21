@@ -68,12 +68,14 @@ test("only a plugin that can still be chosen counts as offered", () => {
 
 const CLI = JSON.stringify({ manifest: 1, name: "cli", title: "Command Line", version: "0.3.0", alwaysOn: true, official: true, icon: "terminal.fill", permissions: ["control"], programs: [{ name: "ardia", path: "bin/ardia" }] });
 useBrowser.getState().hydrate({});
-stub.pluginHost.folders = [{ name: "cli", text: CLI, status: "ok", folderId: "bundled", bundled: true }];
+stub.pluginHost.folders = [];
+stub.pluginHost.officialArtifacts = { cli: CLI };
 startPlugins();
 for (let i = 0; i < 8; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 
 test("closing the consent is no error: the seam marks it cancelled, and nothing else counts as cancelled", async () => {
   const asked = installOfficialPlugin("cli", { showSheet: false });
+  for (let i = 0; i < 8; i++) await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(usePlugins.getState().consent.name, "cli");
   lifecycle.dismissPluginConsent("cli");
   const result = await asked;
@@ -135,7 +137,7 @@ test("the Settings row and the consent sheet say Install for every official plug
   const sheet = readFileSync(new URL("../../components/plugins/PluginConsentSheet.tsx", import.meta.url), "utf8");
   assert.match(row, /<Button title="Install…"/);
   assert.doesNotMatch(row, /Turn On|<Toggle/);
-  assert.match(sheet, /const install = isAlwaysOn\(listing\) \|\| !!m\?\.official;/);
+  assert.match(sheet, /const install = !!m\?\.official;/);
 });
 
 

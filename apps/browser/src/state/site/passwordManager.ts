@@ -208,7 +208,7 @@ function newlyTurnedOn(next: PluginsCommit, before: PluginsCommit): string[] {
     const now = recordOf(next, name);
     if (!now.enabled || (was.enabled && was.approved === now.approved)) return false;
     const m = activeManifest(next, name);
-    return !!m?.passwordManager && !!next.listings[name]?.bundled;
+    return !!m?.passwordManager && !!next.listings[name]?.official;
   });
 }
 

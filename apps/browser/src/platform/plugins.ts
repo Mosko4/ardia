@@ -1,5 +1,9 @@
 import {
   nativeModule,
+  type OfficialCandidate,
+  type OfficialFetchProgress,
+  type OfficialFetchResult,
+  type OfficialPinned,
   type PluginExit,
   type PluginFetchResult,
   type PluginFetchSpec,
@@ -16,6 +20,10 @@ import {
 } from "@ardia/shell";
 
 export type {
+  OfficialCandidate,
+  OfficialFetchProgress,
+  OfficialFetchResult,
+  OfficialPinned,
   PluginExit,
   PluginFetchResult,
   PluginFetchSpec,
@@ -41,7 +49,7 @@ export const stopPluginProcess = (name: string, run: number, graceMs: number) =>
 export const replyToPlugin = (name: string, run: number, line: string) => Plugins().reply(name, run, line);
 export const sendToPlugin = (name: string, run: number, line: string) => Plugins().event(name, run, line);
 export const callPlugin = (name: string, run: number, line: string) => Plugins().call(name, run, line);
-export const removePluginFiles = (name: string) => Plugins().remove(name);
+export const removePluginFiles = (name: string, official: boolean) => Plugins().remove(name, official);
 export const linkPluginPrograms = (spec: PluginProgramsSpec) => Plugins().linkPrograms(spec);
 export const unlinkPluginPrograms = (name: string, programs: string[], remove: boolean) => Plugins().unlinkPrograms(name, programs, remove);
 export const sweepPluginPrograms = (active: string[]) => Plugins().sweepPrograms(active);
@@ -52,6 +60,11 @@ export const programRegistry = () => Plugins().programRegistry();
 export const revealPluginLog = (name: string) => Plugins().revealLog(name);
 export const revealPluginsFolder = () => Plugins().revealFolder();
 export const devSnapshotPluginPage = (name: string, path: string) => Plugins().devSnapshotPage(name, path);
+export const officialPluginsPinned = () => Plugins().officialPlugins();
+export const fetchOfficialPlugin = (name: string) => Plugins().fetchOfficial(name);
+export const cancelOfficialPluginFetch = (name: string) => Plugins().cancelOfficialFetch(name);
+export const promoteOfficialPlugin = (name: string, folderId: string, approved: string) => Plugins().promoteOfficial(name, folderId, approved);
+export const onOfficialFetchProgress = (listener: (e: OfficialFetchProgress) => void) => Plugins().addListener("onOfficialFetch", listener);
 export const hostFetchPlugin = (spec: PluginFetchSpec) => Plugins().hostFetch(spec);
 export const readPluginStorage = (name: string) => Plugins().storageRead(name);
 export const writePluginStorage = (name: string, text: string) => Plugins().storageWrite(name, text);

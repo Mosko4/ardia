@@ -6,10 +6,20 @@ export type PluginFolderEntry = {
   status: "ok" | "missing" | "link" | "notFile" | "tooBig" | "unreadable";
   text?: string;
   folderId?: string;
-  bundled?: boolean;
-  replacesBundled?: boolean;
+  official?: boolean;
+  legacy?: boolean;
+  legacyHash?: string;
+  candidateOnly?: boolean;
+  candidate?: OfficialCandidate;
+  autoInstall?: boolean;
   ignoresUserFolder?: boolean;
 };
+
+export type OfficialCandidate = { folderId: string; text: string; legacyHash: string; version: string };
+export type OfficialPinned = { name: string; version: string; folderId: string };
+export type OfficialFetchCode = "offline" | "failed" | "verify" | "cancelled" | "unsupported";
+export type OfficialFetchResult = { ok: true; candidate: OfficialCandidate; reused?: boolean } | { ok: false; code: OfficialFetchCode; reason: string };
+export type OfficialFetchProgress = { name: string; received: number; total: number };
 
 export type PluginProgramsSpec = {
   name: string;
@@ -21,7 +31,7 @@ export type PluginProgramsSpec = {
 export type PluginAfterUpdateQuitStops = { consent: string; exitedOnTerm: number; killed: number };
 export type PluginProgramRegistry = { claims: Record<string, string>; failClosed: boolean; legacyOwners: string[] };
 export type PluginProgramsResult =
-  | { ok: true; linked: string[]; refused: Record<string, string>; binDir: string; adopted: boolean; adoptBusy?: boolean }
+  | { ok: true; linked: string[]; refused: Record<string, string>; binDir: string; adopted: boolean; adoptBusy?: boolean; kept?: string }
   | { ok: false; reason?: string; stale?: true };
 
 export type PluginStartSpec = {
@@ -55,7 +65,7 @@ export type PluginsNative = {
   reply(name: string, run: number, line: string): void;
   event(name: string, run: number, line: string): void;
   call(name: string, run: number, line: string): void;
-  remove(name: string): Promise<PluginRemoveResult>;
+  remove(name: string, official: boolean): Promise<PluginRemoveResult>;
   linkPrograms(spec: PluginProgramsSpec): Promise<PluginProgramsResult>;
   unlinkPrograms(name: string, programs: string[], remove: boolean): Promise<{ ok: boolean }>;
   sweepPrograms(active: string[]): Promise<void>;
@@ -66,12 +76,17 @@ export type PluginsNative = {
   revealLog(name: string): void;
   revealFolder(): void;
   devSnapshotPage(name: string, path: string): Promise<boolean>;
+  officialPlugins(): Promise<OfficialPinned[] | null>;
+  fetchOfficial(name: string): Promise<OfficialFetchResult>;
+  cancelOfficialFetch(name: string): void;
+  promoteOfficial(name: string, folderId: string, approved: string): Promise<{ ok: true } | { ok: false; reason: string }>;
   hostFetch(spec: PluginFetchSpec): Promise<PluginFetchResult>;
   storageRead(name: string): Promise<PluginStorageReadResult>;
   storageWrite(name: string, text: string): Promise<{ ok: boolean; reason?: string }>;
   readPluginFile(name: string, folderId: string, approved: string, path: string): Promise<PluginFileReadResult>;
   addListener(name: "onLine", listener: (e: PluginLine) => void): EventSubscription;
   addListener(name: "onExit", listener: (e: PluginExit) => void): EventSubscription;
+  addListener(name: "onOfficialFetch", listener: (e: OfficialFetchProgress) => void): EventSubscription;
 };
 
 export type PluginPageEvent<T> = { nativeEvent: T };

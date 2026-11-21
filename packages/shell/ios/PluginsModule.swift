@@ -8,7 +8,7 @@ public class PluginsModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ArdiaPlugins")
 
-    Events("onLine", "onExit")
+    Events("onLine", "onExit", OfficialPluginFetch.progressEvent)
 
     OnCreate {
       PluginHost.shared.attach(self) { [weak self] name, body in self?.sendEvent(name, body) }
@@ -47,6 +47,20 @@ public class PluginsModule: Module {
       PluginProgramLinks.unlink(name, programs: programs, remove: remove) { promise.resolve($0) }
     }
 
+    AsyncFunction("officialPlugins") { () -> [[String: Any]]? in
+      PluginFolders.officialPin().map { pin in pin.entries.map { ["name": $0.name, "version": $0.version, "folderId": $0.folderId] } }
+    }
+    .runOnQueue(DispatchQueue.global(qos: .utility))
+
+    AsyncFunction("fetchOfficial") { (name: String, promise: Promise) in OfficialPluginFetch.shared.fetch(name) { promise.resolve($0) } }
+
+    Function("cancelOfficialFetch") { (name: String) in OfficialPluginFetch.shared.cancel(name) }
+
+    AsyncFunction("promoteOfficial") { (name: String, folderId: String, approved: String) -> [String: Any] in
+      OfficialPluginFetch.promote(name, folderId: folderId, approved: approved)
+    }
+    .runOnQueue(DispatchQueue.global(qos: .userInitiated))
+
     AsyncFunction("hostFetch") { (spec: [String: Any], promise: Promise) in PluginHostFetch.run(spec) { promise.resolve($0) } }
 
     AsyncFunction("storageRead") { (name: String) -> [String: Any] in Self.storageRead(name) }
@@ -60,7 +74,7 @@ public class PluginsModule: Module {
     }
     .runOnQueue(DispatchQueue.global(qos: .userInitiated))
 
-    AsyncFunction("remove") { (name: String, promise: Promise) in Self.remove(name, promise) }
+    AsyncFunction("remove") { (name: String, official: Bool, promise: Promise) in Self.remove(name, official: official, promise) }
       .runOnQueue(.main)
 
     Function("revealLog") { (name: String) in DispatchQueue.main.async { Self.revealLog(name) } }
@@ -143,8 +157,8 @@ public class PluginsModule: Module {
     }
   }
 
-  private static func remove(_ name: String, _ promise: Promise) {
-    PluginHost.shared.remove(name) { problem in
+  private static func remove(_ name: String, official: Bool, _ promise: Promise) {
+    PluginHost.shared.remove(name, official: official) { problem in
       if let problem { return promise.resolve(["ok": false, "reason": problem]) }
       PluginPageView.removeData(name) { promise.resolve(["ok": true]) }
     }

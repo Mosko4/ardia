@@ -17,7 +17,7 @@ const APPLE_PASSWORDS = JSON.stringify({
   icon: "key.fill",
   passwordManager: { fill: "system", fields: ["login", "oneTimeCode"], verificationCodeSetup: "system", passkeys: "system" },
 });
-const FOLDER = { name: "apple-passwords", status: "ok", text: APPLE_PASSWORDS, folderId: "bundled", bundled: true };
+const FOLDER = { name: "apple-passwords", status: "ok", text: APPLE_PASSWORDS, folderId: "bundled", official: true };
 const PLUGINS_JSON = JSON.stringify({ version: 1, plugins: { "apple-passwords": { enabled: true, approved: manifestHash(APPLE_PASSWORDS, "bundled"), values: {}, applied: {} } } });
 const HELD_OFF_JSON = JSON.stringify({ version: 1, offerToSaveHeldOff: [""] });
 const PERSONAL = { id: "default", name: "Personal", color: "plum", icon: null, createdAt: 0, passwordManager: "plugin:apple-passwords" };
