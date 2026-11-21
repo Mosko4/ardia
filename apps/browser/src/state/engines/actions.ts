@@ -197,7 +197,7 @@ function watchClosedTabs() {
       visits.close(id);
     }
     for (const id of siteMoves.keys()) if (!s.tabs[id]) siteMoves.delete(id);
-    for (const id of webKitSites.keys()) if (!s.tabs[id]) webKitSites.delete(id);
+    for (const id of webKitSites.keys()) if (!s.tabs[id] || tabEngine(s, id) !== "webkit") webKitSites.delete(id);
   });
 }
 

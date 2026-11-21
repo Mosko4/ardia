@@ -129,9 +129,14 @@ test("a WebKit tab arriving on a streaming site the list sent there is counted o
   page("http://www.netflix.com/");
   assert.deepEqual(takeStreamingSiteCounts(), {});
   page("https://www.netflix.com/browse");
+  page("https://www.netflix.com/browse");
+  S().updateTab(tabId, { engine: "chromium" });
+  S().updateTab(tabId, { engine: "webkit" });
+  page("https://www.netflix.com/browse");
+  assert.deepEqual(takeStreamingSiteCounts(), { streaming_list_webkit_visits: 2 });
   S().updateSettings({ protectedVideoInWebKit: false });
   page("https://www.disneyplus.com/");
-  assert.deepEqual(takeStreamingSiteCounts(), { streaming_list_webkit_visits: 1 });
+  assert.deepEqual(takeStreamingSiteCounts(), {});
   setConsentPeriod(false, null);
   S().updateSettings({ protectedVideoInWebKit: true });
   page("https://open.spotify.com/");
